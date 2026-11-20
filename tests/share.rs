@@ -410,3 +410,71 @@ fn shares_follow_the_label_rules() {
         }
     }
 }
+
+#[test]
+fn search_finds_files_by_name_and_text_for_whoever_may_see_them() {
+    for (name, instance, _keep) in common::installations() {
+        let app = || TestClient::new(ortus_core::app(Arc::clone(&instance)));
+        let olena = Client {
+            inner: app(),
+            token: signed_in(&instance, "olena@ministry.example", Role::Member),
+        };
+        let marek = Client {
+            inner: app(),
+            token: signed_in(&instance, "marek@ministry.example", Role::Member),
+        };
+        let (_, folder) = olena.json("POST", "/drive/folders", Some(json!({"name": "Shelters"})));
+        let folder = folder["id"].as_str().unwrap().to_string();
+        upload(
+            &olena,
+            &folder,
+            "agreement.txt",
+            "text/plain",
+            b"The school on Park Street is the second site.",
+        );
+        upload(
+            &olena,
+            "",
+            "private-notes.txt",
+            "text/plain",
+            b"Park Street budget, not for sharing.",
+        );
+        olena.json(
+            "POST",
+            &format!("/drive/items/{folder}/shares"),
+            Some(json!({"email": "marek@ministry.example", "role": "view"})),
+        );
+        // Indexing runs in the background: wait for it.
+        let find = |who: &Client<_>, q: &str| -> Vec<String> {
+            for _ in 0..100 {
+                let (_, r) = who.json("GET", &format!("/search?q={q}"), None);
+                let names: Vec<String> = r["results"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .map(|h| h["title"].as_str().unwrap_or_default().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !names.is_empty() {
+                    return names;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Vec::new()
+        };
+        let mut mine = find(&olena, "park");
+        while mine.len() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            mine = find(&olena, "park");
+        }
+        mine.sort();
+        assert_eq!(vec!["agreement.txt", "private-notes.txt"], mine, "{name}");
+        assert_eq!(
+            vec!["agreement.txt"],
+            find(&marek, "park"),
+            "{name}: only what is shared with him"
+        );
+        assert_eq!(vec!["Shelters"], find(&marek, "shelters"), "{name}");
+    }
+}

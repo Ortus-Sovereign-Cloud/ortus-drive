@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod index;
+pub mod preview;
 pub mod public;
 pub mod share;
 pub mod store;
@@ -39,7 +40,25 @@ impl App for Drive {
         let mut all = api::routes();
         all.extend(share::routes());
         all.extend(public::routes());
+        all.extend(preview::routes());
         all
+    }
+
+    fn search_owners<'a>(
+        &'a self,
+        instance: &'a Instance,
+        user: &'a str,
+    ) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(index::owners_sharing_with(instance, user))
+    }
+
+    fn search_allowed<'a>(
+        &'a self,
+        instance: &'a Instance,
+        user: &'a str,
+        ids: Vec<String>,
+    ) -> BoxFuture<'a, Vec<String>> {
+        Box::pin(index::visible(instance, user, ids))
     }
 
     fn periodic(&self) -> Vec<(&'static str, i64)> {

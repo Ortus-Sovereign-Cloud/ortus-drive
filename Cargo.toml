@@ -8,6 +8,9 @@ repository = "https://github.com/Ortus-Sovereign-Cloud/ortus-drive"
 publish = false
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+quick-xml = "0.42"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 rust-embed = "8.14.0"
 rust-web-server = "18.34"
 serde = { version = "1.0.229", features = ["derive"] }

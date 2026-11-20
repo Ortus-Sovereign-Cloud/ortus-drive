@@ -224,6 +224,7 @@ async fn add_folder(request: &Request, instance: &Arc<Instance>) -> Result<Respo
     )
     .await
     .map_err(drive_error)?;
+    crate::index::item_changed(instance, &folder).await;
     Ok(ok(&items_json(
         instance,
         &me.id,
