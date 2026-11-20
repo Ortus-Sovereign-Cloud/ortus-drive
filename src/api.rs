@@ -735,6 +735,9 @@ async fn content(
         return Err(drive_error(DriveError::NotFound));
     }
     let s = instance.store.as_ref();
+    if item.mime == crate::service::DOC_MIME {
+        return Err(ApiError::conflict("Open it in Docs."));
+    }
     let version = query(request, "version").and_then(|v| v.parse().ok());
     let v = store::version(s, &item, version)
         .await?

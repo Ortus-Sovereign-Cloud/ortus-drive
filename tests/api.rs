@@ -395,3 +395,105 @@ fn files_from_mail_land_in_from_email() {
         );
     }
 }
+
+#[test]
+fn other_apps_keep_documents_in_the_drive() {
+    for (name, instance, _keep) in common::installations() {
+        for app in instance.apps.clone() {
+            app.provide(&instance, &instance.services);
+        }
+        let olena = Client {
+            inner: TestClient::new(ortus_core::app(Arc::clone(&instance))),
+            token: signed_in(&instance, "olena@ministry.example", Role::Member),
+        };
+        signed_in(&instance, "marek@ministry.example", Role::Member);
+        let id = |e: &str| {
+            ortus_core::runtime::block_on(ortus_core::auth::accounts::by_email(
+                instance.store.as_ref(),
+                e,
+            ))
+            .unwrap()
+            .unwrap()
+            .id
+        };
+        let drive = ortus_core::runtime::block_on(
+            instance
+                .services
+                .get::<dyn ortus_core::interfaces::Drive>(&instance.switches),
+        )
+        .unwrap();
+        let (_, folder) = olena.json("POST", "/drive/folders", Some(json!({"name": "Plans"})));
+        let folder = folder["id"].as_str().unwrap().to_string();
+        olena.json(
+            "PUT",
+            &format!("/drive/items/{folder}/label"),
+            Some(json!({"label": "official-sensitive"})),
+        );
+        let made = ortus_core::runtime::block_on(drive.create(
+            &id("olena@ministry.example"),
+            &folder,
+            "Flood response plan 2026",
+            "application/vnd.ortus.doc",
+        ))
+        .unwrap();
+        assert_eq!(format!("/docs?doc={}", made.id), made.path);
+        let seen =
+            ortus_core::runtime::block_on(drive.describe(&id("olena@ministry.example"), &made.id))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            (
+                "owner",
+                Some("official-sensitive".to_string()),
+                vec!["Plans".to_string()]
+            ),
+            (seen.role.as_str(), seen.label.clone(), seen.path.clone()),
+            "{name}"
+        );
+        assert!(
+            ortus_core::runtime::block_on(drive.describe(&id("marek@ministry.example"), &made.id))
+                .unwrap()
+                .is_none(),
+            "{name}: not shared"
+        );
+        olena.json(
+            "POST",
+            &format!("/drive/items/{}/shares", made.id),
+            Some(json!({"email": "marek@ministry.example", "role": "comment"})),
+        );
+        assert_eq!(
+            "comment",
+            ortus_core::runtime::block_on(drive.describe(&id("marek@ministry.example"), &made.id))
+                .unwrap()
+                .unwrap()
+                .role
+        );
+        assert!(
+            ortus_core::runtime::block_on(drive.rename(
+                &id("marek@ministry.example"),
+                &made.id,
+                "Mine"
+            ))
+            .is_err(),
+            "{name}: comment cannot rename"
+        );
+        ortus_core::runtime::block_on(drive.rename(
+            &id("olena@ministry.example"),
+            &made.id,
+            "Flood plan",
+        ))
+        .unwrap();
+        assert_eq!(
+            409,
+            olena
+                .send(
+                    "GET",
+                    &format!("/drive/items/{}/content", made.id),
+                    None,
+                    false,
+                    &[]
+                )
+                .0
+        );
+    }
+}

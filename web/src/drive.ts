@@ -47,6 +47,7 @@ interface Upload {
 /** The short kind of a file, as its badge shows it. */
 export function badge(item: { kind: string; name: string }): string {
   if (item.kind === "folder") return "DIR";
+  if ((item as { mime?: string }).mime === "application/vnd.ortus.doc") return "DOC";
   const ext = (item.name.split(".").pop() ?? "").toLowerCase();
   const map: Record<string, string> = { docx: "DOC", doc: "DOC", odt: "DOC", pdf: "PDF", xlsx: "XLS", xls: "XLS", ods: "XLS", csv: "XLS", pptx: "PPT", odp: "PPT", zip: "ZIP", png: "IMG", jpg: "IMG", jpeg: "IMG", gif: "IMG", webp: "IMG", txt: "TXT", md: "TXT" };
   return map[ext] ?? (ext.slice(0, 3).toUpperCase() || "FILE");
@@ -575,6 +576,7 @@ export class OrtusDriveHome extends LitElement {
 
   private open(item: Item): void {
     if (item.kind === "folder") this.openFolder(item.id);
+    else if (item.mime === "application/vnd.ortus.doc") go(`/docs?doc=${encodeURIComponent(item.id)}`);
     else go(`/drive?file=${encodeURIComponent(item.id)}`);
   }
 

@@ -35,6 +35,12 @@ pub async fn index_now(instance: &Instance, item: &Item) -> Result<(), String> {
             .await
             .unwrap_or_default()
     };
+    if item.mime == crate::service::DOC_MIME {
+        // A document is found through the docs app, with its text.
+        return search::remove(instance.store.as_ref(), "drive", &item.id)
+            .await
+            .map_err(|e| e.to_string());
+    }
     let path = if item.is_folder() {
         format!("/drive?folder={}", item.id)
     } else {
