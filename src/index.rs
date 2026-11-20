@@ -56,6 +56,30 @@ pub async fn index_now(instance: &Instance, item: &Item) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// A folder (and everything in it) came back: indexed again.
+pub async fn tree_changed(instance: &Arc<Instance>, root: &Item) {
+    let (instance, root) = (Arc::clone(instance), root.clone());
+    tokio::spawn(async move {
+        let s = instance.store.as_ref();
+        let mut queue = vec![root];
+        let mut seen = 0;
+        while let Some(item) = queue.pop() {
+            seen += 1;
+            if seen > 50_000 {
+                break;
+            }
+            let _ = index_now(&instance, &item).await;
+            if item.is_folder() {
+                queue.extend(
+                    store::children(s, &item.owner_id, &item.id)
+                        .await
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    });
+}
+
 /// A file or folder went to the trash or away (with what is under it).
 pub async fn item_removed(instance: &Arc<Instance>, id: &str) {
     let s = instance.store.as_ref();

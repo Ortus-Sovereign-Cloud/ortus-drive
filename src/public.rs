@@ -25,6 +25,7 @@ async fn open(
     request: &Request,
     params: &PathParams,
     instance: &Arc<Instance>,
+    address: &str,
 ) -> Result<(Share, Item), ApiError> {
     let token = params.get("token").unwrap_or_default();
     let share = by_token(instance, token).await?.ok_or_else(gone)?;
@@ -47,7 +48,7 @@ async fn open(
             .find(|h| h.name.eq_ignore_ascii_case("x-ortus-link-password"))
             .map(|h| h.value.to_string())
             .unwrap_or_default();
-        let key = format!("drive-link:{token}");
+        let key = format!("drive-link:{token}:{address}");
         let now = ortus_core::program::now_ms();
         if given.is_empty() {
             return Err(ApiError {
@@ -82,8 +83,16 @@ async fn open(
 }
 
 /// An item under the link's folder (or the link's own item).
-async fn within(instance: &Instance, root: &Item, id: Option<String>) -> Result<Item, ApiError> {
+async fn within(
+    instance: &Instance,
+    share: &Share,
+    root: &Item,
+    id: Option<String>,
+) -> Result<Item, ApiError> {
     let Some(id) = id.filter(|i| !i.is_empty() && *i != root.id) else {
+        if !crate::share::allows(instance, share, root).await? {
+            return Err(gone());
+        }
         return Ok(root.clone());
     };
     let s = instance.store.as_ref();
@@ -100,6 +109,10 @@ async fn within(instance: &Instance, root: &Item, id: Option<String>) -> Result<
     {
         return Err(drive_error(DriveError::NotFound));
     }
+    // Its own label must allow the link too (a stricter file inside).
+    if !crate::share::allows(instance, share, &item).await? {
+        return Err(drive_error(DriveError::NotFound));
+    }
     Ok(item)
 }
 
@@ -112,6 +125,7 @@ async fn show(
     request: &Request,
     params: &PathParams,
     instance: &Arc<Instance>,
+    address: &str,
 ) -> Result<Response, ApiError> {
     let token = params.get("token").unwrap_or_default();
     // Before the password: only that one is needed.
@@ -125,8 +139,8 @@ async fn show(
             return Ok(ok(&json!({ "needsPassword": true })));
         }
     }
-    let (share, root) = open(request, params, instance).await?;
-    let item = within(instance, &root, query(request, "item")).await?;
+    let (share, root) = open(request, params, instance, address).await?;
+    let item = within(instance, &share, &root, query(request, "item")).await?;
     let s = instance.store.as_ref();
     if query(request, "item").is_none() {
         s.execute(
@@ -139,15 +153,15 @@ async fn show(
         .await?
         .map(|u| u.name)
         .unwrap_or_default();
-    let children: Vec<Value> = if item.is_folder() {
-        store::children(s, &item.owner_id, &item.id)
-            .await?
-            .iter()
-            .map(entry)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mut children = Vec::new();
+    if item.is_folder() {
+        for child in store::children(s, &item.owner_id, &item.id).await? {
+            // What the link may not show is not listed.
+            if crate::share::allows(instance, &share, &child).await? {
+                children.push(entry(&child));
+            }
+        }
+    }
     let mut path = vec![json!({"id": item.id, "name": item.name})];
     if item.id != root.id {
         for a in store::ancestors(s, &item).await? {
@@ -174,9 +188,10 @@ async fn content(
     request: &Request,
     params: &PathParams,
     instance: &Arc<Instance>,
+    address: &str,
 ) -> Result<Response, ApiError> {
-    let (share, root) = open(request, params, instance).await?;
-    let item = within(instance, &root, query(request, "item")).await?;
+    let (share, root) = open(request, params, instance, address).await?;
+    let item = within(instance, &share, &root, query(request, "item")).await?;
     if item.is_folder() {
         return Err(drive_error(DriveError::NotFound));
     }
@@ -221,19 +236,29 @@ async fn content(
 fn h_show(
     request: Request,
     params: PathParams,
-    _: ConnectionInfo,
+    connection: ConnectionInfo,
     instance: Arc<Instance>,
 ) -> BoxFuture<'static, Response> {
-    Box::pin(async move { answer(&request, show(&request, &params, &instance).await) })
+    Box::pin(async move {
+        answer(
+            &request,
+            show(&request, &params, &instance, &connection.client.ip).await,
+        )
+    })
 }
 
 fn h_content(
     request: Request,
     params: PathParams,
-    _: ConnectionInfo,
+    connection: ConnectionInfo,
     instance: Arc<Instance>,
 ) -> BoxFuture<'static, Response> {
-    Box::pin(async move { answer(&request, content(&request, &params, &instance).await) })
+    Box::pin(async move {
+        answer(
+            &request,
+            content(&request, &params, &instance, &connection.client.ip).await,
+        )
+    })
 }
 
 fn object() -> Value {

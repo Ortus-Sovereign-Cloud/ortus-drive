@@ -243,6 +243,14 @@ async fn item_tx(tx: &mut dyn AsyncTx, id: &str) -> StoreResult<Option<Item>> {
 }
 
 /// The folders above an item, nearest first (not the item itself).
+/// Whether the folders above an item go deeper than the drive allows
+/// (only possible through old data): such items are reached by nobody
+/// but their owner.
+pub async fn too_deep(store: &dyn AsyncStore, item: &Item) -> StoreResult<bool> {
+    let above = ancestors(store, item).await?;
+    Ok(above.len() >= MAX_DEPTH && above.last().is_some_and(|a| !a.parent_id.is_empty()))
+}
+
 pub async fn ancestors(store: &dyn AsyncStore, item: &Item) -> StoreResult<Vec<Item>> {
     let mut out = Vec::new();
     let mut parent = item.parent_id.clone();
@@ -277,6 +285,9 @@ pub async fn role(store: &dyn AsyncStore, user_id: &str, item: &Item) -> StoreRe
         return Ok(Some(Role::Owner));
     }
     if item.trashed_at.is_some() {
+        return Ok(None);
+    }
+    if too_deep(store, item).await? {
         return Ok(None);
     }
     let mut ids = vec![item.id.clone()];
@@ -343,7 +354,11 @@ async fn name_taken(
 
 /// The owner of the tree a new item goes into, after checking the person
 /// may add there (owner or editor).
-async fn place(store: &dyn AsyncStore, user_id: &str, parent_id: &str) -> DriveResult<String> {
+pub(crate) async fn place(
+    store: &dyn AsyncStore,
+    user_id: &str,
+    parent_id: &str,
+) -> DriveResult<String> {
     if parent_id.is_empty() {
         return Ok(user_id.to_string());
     }
@@ -351,6 +366,9 @@ async fn place(store: &dyn AsyncStore, user_id: &str, parent_id: &str) -> DriveR
         .await?
         .filter(|p| p.is_folder() && p.trashed_at.is_none())
         .ok_or(DriveError::NotFound)?;
+    if ancestors(store, &parent).await?.len() + 2 > MAX_DEPTH {
+        return Err(DriveError::BadMove);
+    }
     match role(store, user_id, &parent).await? {
         Some(Role::Owner | Role::Edit) => Ok(parent.owner_id),
         Some(_) => Err(DriveError::Forbidden),
@@ -418,10 +436,7 @@ pub async fn fits(store: &dyn AsyncStore, owner_id: &str, more: i64) -> StoreRes
 pub fn blob_key(owner_id: &str) -> String {
     format!(
         "drive/{}/{}",
-        owner_id
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .collect::<String>(),
+        blob_owner(owner_id),
         ortus_core::auth::random_hex(16)
     )
 }
@@ -452,7 +467,26 @@ pub async fn add_file(
         return Err(DriveError::OverQuota);
     }
     let now = now();
+    let limit = quota(store, &owner).await?;
     let mut tx = store.begin().await?;
+    // Again inside the transaction: uploads finishing together share one quota.
+    if let Some(q) = limit {
+        tx.execute(
+            "UPDATE core_users SET quota_bytes = quota_bytes WHERE id = $1",
+            &[owner.as_str().into()],
+        )
+        .await?;
+        let used = tx
+            .query("SELECT CAST(COALESCE(SUM(v.size), 0) AS BIGINT) FROM drive_versions v JOIN drive_items i ON i.id = v.item_id WHERE i.owner_id = $1", &[owner.as_str().into()])
+            .await?
+            .first()
+            .and_then(|r| r.int(0))
+            .unwrap_or(0);
+        if used + upload.size > q {
+            tx.rollback().await?;
+            return Err(DriveError::OverQuota);
+        }
+    }
     let same = tx
         .query(
             &format!("{ITEM} WHERE owner_id = $1 AND parent_id = $2 AND LOWER(name) = LOWER($3) AND trashed_at IS NULL"),
@@ -753,6 +787,10 @@ pub async fn destroy(store: &dyn AsyncStore, files: &Files, item: &Item) -> Stor
                 .await?;
             if still.is_empty() {
                 let _ = files.delete(&blob).await;
+                // Its thumbnail and text go with it.
+                let mangled = blob.replace('/', "_");
+                let _ = files.delete(&format!("drive-thumbs/{mangled}")).await;
+                let _ = files.delete(&format!("drive-text/{mangled}")).await;
             }
         }
     }
@@ -930,13 +968,38 @@ pub async fn set_label(
 
 /// The label that governs an item: its own, else the nearest folder's.
 pub async fn effective_label(store: &dyn AsyncStore, item: &Item) -> StoreResult<Option<String>> {
-    if item.label.is_some() {
-        return Ok(item.label.clone());
+    // The strictest label on the item or any folder above it: a stricter
+    // folder cannot be escaped by labelling what is inside more loosely.
+    let mut found: Vec<String> = item.label.iter().cloned().collect();
+    found.extend(
+        ancestors(store, item)
+            .await?
+            .into_iter()
+            .filter_map(|a| a.label),
+    );
+    if too_deep(store, item).await? {
+        // Unknown folders above: the strictest label there is.
+        let labels = ortus_core::policy::labels(store).await?;
+        return Ok(labels.into_iter().max_by_key(|l| l.rank).map(|l| l.id));
     }
-    Ok(ancestors(store, item)
+    let mut best: Option<(i64, String)> = None;
+    for id in found {
+        let rank = ortus_core::policy::label(store, Some(&id)).await?.rank;
+        if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+            best = Some((rank, id));
+        }
+    }
+    Ok(best.map(|(_, id)| id))
+}
+
+/// Everything in a folder, trashed or not.
+pub async fn children_all(store: &dyn AsyncStore, parent_id: &str) -> StoreResult<Vec<Item>> {
+    Ok(store
+        .query(&format!("{ITEM} WHERE parent_id = $1"), &[parent_id.into()])
         .await?
-        .into_iter()
-        .find_map(|a| a.label))
+        .iter()
+        .map(item_of)
+        .collect())
 }
 
 /// Everything a person's account leaves behind when it is removed.
@@ -950,6 +1013,55 @@ pub async fn forget(tx: &mut dyn AsyncTx, user_id: &str) -> StoreResult<()> {
         "DELETE FROM drive_items WHERE owner_id = $1",
     ] {
         tx.execute(sql, &[Value::from(user_id)]).await?;
+    }
+    // Their files' contents go by job, once this commits.
+    let id = format!("drive-forget-{}", ortus_core::auth::random_hex(12));
+    let payload = blob_owner(user_id);
+    ortus_core::jobs::enqueue_in(
+        tx,
+        &ortus_core::jobs::NewJob {
+            id: &id,
+            kind: FORGET_FILES_JOB,
+            payload: &payload,
+            run_at: now(),
+            max_attempts: 10,
+        },
+        now(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The job that removes a forgotten account's file contents.
+pub const FORGET_FILES_JOB: &str = "drive.forget-files";
+
+/// The part of blob keys that names their owner.
+fn blob_owner(owner_id: &str) -> String {
+    owner_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+/// Removes everything stored for an owner (`payload` from [`forget`]):
+/// contents, thumbnails and text.
+pub async fn forget_files(files: &Files, owner: &str) -> Result<(), String> {
+    if owner.is_empty() || !owner.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Ok(());
+    }
+    for key in files
+        .list(&format!("drive/{owner}/"))
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        files.delete(&key).await.map_err(|e| e.to_string())?;
+    }
+    for cache in ["drive-thumbs/", "drive-text/"] {
+        for key in files.list(cache).await.map_err(|e| e.to_string())? {
+            if key.starts_with(&format!("{cache}drive_{owner}_")) {
+                files.delete(&key).await.map_err(|e| e.to_string())?;
+            }
+        }
     }
     Ok(())
 }

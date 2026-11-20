@@ -43,6 +43,8 @@ pub async fn save(
         .put(&blob, contents)
         .await
         .map_err(|e| e.to_string())?;
+    let mime = crate::api::safe_mime(mime);
+    let mime = mime.as_str();
     let source = source
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())

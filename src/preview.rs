@@ -74,8 +74,15 @@ fn xml_text(xml: &str, names: &[&str], breaks: &[&str]) -> String {
     out
 }
 
-/// Entries of a zip, by name, read up to a size.
-fn zip_entries(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Vec<String> {
+/// Entries of a zip, by name, each turned into text at once, within one
+/// budget of unpacked bytes for the whole file (a small file may claim to
+/// unpack into a huge one).
+fn zip_entries(
+    bytes: &[u8],
+    wanted: impl Fn(&str) -> bool,
+    to_text: impl Fn(&str) -> String,
+) -> Vec<String> {
+    const BUDGET: u64 = 50 * 1024 * 1024;
     let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return Vec::new();
     };
@@ -85,18 +92,17 @@ fn zip_entries(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Vec<String> {
         .filter(|n| wanted(n))
         .collect();
     names.sort_by_key(|n| (n.len(), n.clone()));
+    let mut left = BUDGET;
     let mut out = Vec::new();
     for name in names.into_iter().take(500) {
+        if left == 0 {
+            break;
+        }
         if let Ok(file) = archive.by_name(&name) {
-            let mut text = String::new();
-            // A small entry may claim to unpack into a huge one: read a bounded amount.
-            if file
-                .take(20 * 1024 * 1024)
-                .read_to_string(&mut text)
-                .is_ok()
-            {
-                out.push(text);
-            }
+            let mut xml = String::new();
+            let read = file.take(left).read_to_string(&mut xml).unwrap_or(0) as u64;
+            left = left.saturating_sub(read);
+            out.push(to_text(&xml));
         }
     }
     out
@@ -108,28 +114,30 @@ pub fn text_of(name: &str, mime: &str, bytes: &[u8]) -> Option<String> {
     let text = match ext.as_str() {
         "txt" | "md" | "csv" | "tsv" | "json" | "log" | "ics" | "vcf" | "eml" | "html" | "htm"
         | "xml" => String::from_utf8_lossy(bytes).into_owned(),
-        "docx" => zip_entries(bytes, |n| n == "word/document.xml")
-            .iter()
-            .map(|x| xml_text(x, &["t"], &["p"]))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        "pptx" => zip_entries(bytes, |n| {
-            n.starts_with("ppt/slides/slide") && n.ends_with(".xml")
-        })
-        .iter()
-        .map(|x| xml_text(x, &["t"], &["p"]))
-        .collect::<Vec<_>>()
+        "docx" => zip_entries(
+            bytes,
+            |n| n == "word/document.xml",
+            |x| xml_text(x, &["t"], &["p"]),
+        )
         .join("\n"),
-        "xlsx" => zip_entries(bytes, |n| n == "xl/sharedStrings.xml")
-            .iter()
-            .map(|x| xml_text(x, &["t"], &["si"]))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        "odt" | "ods" | "odp" => zip_entries(bytes, |n| n == "content.xml")
-            .iter()
-            .map(|x| xml_text(x, &["p", "h", "span"], &["p", "h"]))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        "pptx" => zip_entries(
+            bytes,
+            |n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"),
+            |x| xml_text(x, &["t"], &["p"]),
+        )
+        .join("\n"),
+        "xlsx" => zip_entries(
+            bytes,
+            |n| n == "xl/sharedStrings.xml",
+            |x| xml_text(x, &["t"], &["si"]),
+        )
+        .join("\n"),
+        "odt" | "ods" | "odp" => zip_entries(
+            bytes,
+            |n| n == "content.xml",
+            |x| xml_text(x, &["p", "h", "span"], &["p", "h"]),
+        )
+        .join("\n"),
         _ if mime.starts_with("text/") => String::from_utf8_lossy(bytes).into_owned(),
         _ => return None,
     };

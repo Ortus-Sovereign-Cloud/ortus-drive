@@ -13,7 +13,7 @@ pub mod store;
 
 use std::sync::Arc;
 
-use ortus_core::app::{App, AppInfo, Group, OutsideJobKind};
+use ortus_core::app::{App, AppInfo, Group, JobKind, OutsideJobKind};
 use ortus_core::instance::Instance;
 use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
 
@@ -80,6 +80,17 @@ impl App for Drive {
 
     fn periodic(&self) -> Vec<(&'static str, i64)> {
         vec![(SWEEP_JOB, 60 * 60 * 1000)]
+    }
+
+    fn jobs(&self, instance: &Arc<Instance>) -> Vec<JobKind> {
+        let instance = Arc::clone(instance);
+        vec![JobKind {
+            kind: store::FORGET_FILES_JOB.into(),
+            handler: Box::new(move |job, _tx| {
+                let (instance, owner) = (Arc::clone(&instance), job.payload.clone());
+                Box::pin(async move { store::forget_files(&instance.files, &owner).await })
+            }),
+        }]
     }
 
     fn outside_jobs(&self, instance: &Arc<Instance>) -> Vec<OutsideJobKind> {

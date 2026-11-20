@@ -69,6 +69,11 @@ export function whenText(ms: number): string {
 }
 
 export function go(path: string): void {
+  // Another app is a new page; the shell does not follow history there.
+  if (!path.startsWith("/drive")) {
+    location.assign(path);
+    return;
+  }
   history.pushState(null, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }

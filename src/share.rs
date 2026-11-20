@@ -84,6 +84,36 @@ pub async fn by_token(instance: &Instance, token: &str) -> Result<Option<Share>,
         .filter(|s| s.expires_at.is_none_or(|e| e > now)))
 }
 
+/// Whether the label of an item reached through a link still allows that
+/// link (a stricter file inside a linked folder does not).
+pub async fn allows(instance: &Instance, share: &Share, item: &Item) -> Result<bool, ApiError> {
+    let s = instance.store.as_ref();
+    let label = store::effective_label(s, item).await?;
+    let (action, audience) = match share.kind.as_str() {
+        "outside" => (
+            Action::Share,
+            Audience::Outside(share.email.clone().unwrap_or_default()),
+        ),
+        _ => (Action::Link, Audience::Anyone),
+    };
+    let (decision, _, _) = policy::judge(
+        s,
+        &policy::Ask {
+            actor: "",
+            action,
+            label: label.as_deref(),
+            audience: &audience,
+            channel: Channel::Files,
+            object: &format!("drive:{}:{}", item.kind, item.id),
+            reason: None,
+        },
+    )
+    .await?;
+    // A warning was answered with a reason when the share was made.
+    Ok(matches!(decision, Decision::Allow { .. })
+        || (share.kind == "outside" && matches!(decision, Decision::NeedsReason { .. })))
+}
+
 pub fn link_url(instance: &Instance, token: &str) -> String {
     format!(
         "{}/drive/public/s/{token}",
@@ -462,6 +492,16 @@ async fn change_link(
         .map(share_of)
         .ok_or_else(|| ApiError::not_found("There is no such link."))?;
     let (item, _) = reach(instance, &me.id, &share.item_id, Role::Edit).await?;
+    // A changed link is a link anew: the label must still allow it.
+    ask(
+        instance,
+        &me.id,
+        &item,
+        Action::Link,
+        &Audience::Anyone,
+        None,
+    )
+    .await?;
     let s = instance.store.as_ref();
     let now = ortus_core::program::now_ms();
     if let Some(e) = input.expires_at {
@@ -644,7 +684,8 @@ pub async fn recheck(instance: &Instance, user: &str, item: &Item) -> Result<usi
             }
         }
         if it.is_folder() {
-            queue.extend(store::children(s, &it.owner_id, &it.id).await?);
+            // Trashed things too: they may come back.
+            queue.extend(store::children_all(s, &it.id).await?);
         }
     }
     Ok(removed)
@@ -653,6 +694,10 @@ pub async fn recheck(instance: &Instance, user: &str, item: &Item) -> Result<usi
 /// Who has an item and how, as the share dialog shows it.
 async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, ApiError> {
     let s = instance.store.as_ref();
+    // Links and outside addresses only for those who may change sharing.
+    let editor = store::role(s, me, item)
+        .await?
+        .is_some_and(|r| r >= Role::Edit);
     let mut people = Vec::new();
     if let Some(owner) = ortus_core::auth::accounts::by_id(s, &item.owner_id).await? {
         people.push(json!({"name": owner.name, "email": owner.email, "role": "owner", "you": owner.id == me}));
@@ -671,8 +716,9 @@ async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, 
                 let name = s.query("SELECT name FROM core_groups WHERE id = $1", &[share.target.as_str().into()]).await?.first().and_then(|r| r.text(0).map(str::to_string)).unwrap_or_default();
                 groups.push(json!({"share": share.id, "group": share.target, "name": name, "role": share.role}));
             }
-            "outside" => outside.push(json!({"share": share.id, "email": share.email, "role": "view", "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "opened": share.opened})),
-            "link" => link = json!({"share": share.id, "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "password": share.password.is_some(), "noDownload": share.no_download, "opened": share.opened}),
+            "outside" if editor => outside.push(json!({"share": share.id, "email": share.email, "role": "view", "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "opened": share.opened})),
+            "link" if editor => link = json!({"share": share.id, "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "password": share.password.is_some(), "noDownload": share.no_download, "opened": share.opened}),
+            "link" => link = json!({"expiresAt": share.expires_at}),
             _ => {}
         }
     }

@@ -38,7 +38,8 @@ fn percent(v: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(x) = u8::from_str_radix(&v[i + 1..i + 3], 16) {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(x) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(x);
                 i += 3;
                 continue;
@@ -260,7 +261,7 @@ struct NewUpload {
     mime: String,
 }
 
-fn safe_mime(mime: &str) -> String {
+pub(crate) fn safe_mime(mime: &str) -> String {
     let m = mime.trim().to_ascii_lowercase();
     if !m.is_empty()
         && m.len() <= 100
@@ -297,7 +298,18 @@ async fn start_upload(request: &Request, instance: &Arc<Instance>) -> Result<Res
             .map(|p| p.owner_id)
             .unwrap_or_default()
     };
-    if !store::fits(s, &owner, input.size).await? {
+    // Uploads under way count against the quota too, and are few at a time.
+    let pending = s
+        .query("SELECT COUNT(*), CAST(COALESCE(SUM(size), 0) AS BIGINT) FROM drive_uploads WHERE user_id = $1", &[me.id.as_str().into()])
+        .await?;
+    let (open, pending_bytes) = pending
+        .first()
+        .map(|r| (r.int(0).unwrap_or(0), r.int(1).unwrap_or(0)))
+        .unwrap_or((0, 0));
+    if open >= 20 {
+        return Err(ApiError::too_many("Finish or cancel some uploads first."));
+    }
+    if !store::fits(s, &owner, input.size + pending_bytes).await? {
         return Err(drive_error(DriveError::OverQuota));
     }
     let id = format!("u{}", ortus_core::auth::random_hex(16));
@@ -353,6 +365,12 @@ async fn put_part(
     if bytes.len() > MAX_PART {
         return Err(ApiError::bad_request("A part is at most 16 MB."));
     }
+    // Only the parts the declared size needs, each at most its share.
+    let parts = (upload.size + MAX_PART as i64 - 1) / MAX_PART as i64;
+    let expected = (upload.size - n * MAX_PART as i64).min(MAX_PART as i64);
+    if n >= parts.max(1) || bytes.len() as i64 > expected.max(0) {
+        return Err(ApiError::bad_request("That part is not in this upload."));
+    }
     instance
         .files
         .put(&part_key(&upload.id, n), bytes)
@@ -395,21 +413,23 @@ async fn finish_upload(
             let _ = writer.abort().await;
             return Err(ApiError::bad_request(format!("Part {i} is missing.")));
         }
-        let bytes = instance
-            .files
-            .get(key)
-            .await
-            .map_err(|e| drive_error(e.into()))?
-            .unwrap_or_default();
+        // Whatever goes wrong, the half-written file is given up.
+        let bytes = match instance.files.get(key).await {
+            Ok(b) => b.unwrap_or_default(),
+            Err(e) => {
+                let _ = writer.abort().await;
+                return Err(drive_error(e.into()));
+            }
+        };
         size += bytes.len() as i64;
         if size > MAX_FILE {
             let _ = writer.abort().await;
             return Err(ApiError::bad_request("A file is at most 10 GB."));
         }
-        writer
-            .write(&bytes)
-            .await
-            .map_err(|e| drive_error(e.into()))?;
+        if let Err(e) = writer.write(&bytes).await {
+            let _ = writer.abort().await;
+            return Err(drive_error(e.into()));
+        }
     }
     if size != upload.size {
         let _ = writer.abort().await;
@@ -517,7 +537,7 @@ pub async fn sweep_uploads(instance: &Instance) -> Result<(), String> {
 
 /// A file's contents, read in parts as the client takes them.
 pub(crate) struct Stream {
-    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+    rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
     chunk: Vec<u8>,
     pos: usize,
 }
@@ -525,13 +545,14 @@ pub(crate) struct Stream {
 impl std::io::Read for Stream {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         while self.pos >= self.chunk.len() {
-            match self.rx.recv() {
-                Ok(Ok(next)) => {
+            // Read on a blocking thread (the server's), never an async worker.
+            match self.rx.blocking_recv() {
+                Some(Ok(next)) => {
                     self.chunk = next;
                     self.pos = 0;
                 }
-                Ok(Err(e)) => return Err(std::io::Error::other(e)),
-                Err(_) => return Ok(0),
+                Some(Err(e)) => return Err(std::io::Error::other(e)),
+                None => return Ok(0),
             }
         }
         let n = out.len().min(self.chunk.len() - self.pos);
@@ -543,7 +564,9 @@ impl std::io::Read for Stream {
 
 /// Streams bytes `start..end` of the blob, read on the core's I/O runtime.
 pub(crate) fn stream(instance: &Arc<Instance>, blob: &str, start: u64, end: u64) -> Stream {
-    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    // An async channel: a slow client makes the reader wait, without
+    // holding one of the I/O runtime's threads.
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
     let (instance, blob) = (Arc::clone(instance), blob.to_string());
     ortus_core::runtime::io().spawn(async move {
         let mut at = start;
@@ -553,13 +576,13 @@ pub(crate) fn stream(instance: &Arc<Instance>, blob: &str, start: u64, end: u64)
                 Ok(Some(bytes)) if !bytes.is_empty() => bytes,
                 Ok(_) => break,
                 Err(e) => {
-                    let _ = tx.send(Err(e.to_string()));
+                    let _ = tx.send(Err(e.to_string())).await;
                     break;
                 }
             };
             at += part.len() as u64;
             // The client went away: stop reading.
-            if tx.send(Ok(part)).is_err() {
+            if tx.send(Ok(part)).await.is_err() {
                 break;
             }
         }
@@ -572,6 +595,7 @@ pub(crate) fn stream(instance: &Arc<Instance>, blob: &str, start: u64, end: u64)
 }
 
 /// One byte range from a Range header (`bytes=a-b`, `bytes=a-`, `bytes=-n`).
+/// Always a non-empty range inside the file.
 pub(crate) fn range(request: &Request, size: u64) -> Option<Result<(u64, u64), ()>> {
     let value = request
         .headers
@@ -585,9 +609,11 @@ pub(crate) fn range(request: &Request, size: u64) -> Option<Result<(u64, u64), (
     }
     let (a, b) = spec.split_once('-')?;
     let r = match (a.trim().parse::<u64>().ok(), b.trim().parse::<u64>().ok()) {
-        (Some(a), Some(b)) if a <= b && a < size => Ok((a, (b + 1).min(size))),
+        (Some(a), Some(b)) if a <= b && a < size => Ok((a, b.saturating_add(1).min(size))),
         (Some(a), None) if b.trim().is_empty() && a < size => Ok((a, size)),
-        (None, Some(n)) if a.trim().is_empty() && n > 0 => Ok((size.saturating_sub(n), size)),
+        (None, Some(n)) if a.trim().is_empty() && n > 0 && size > 0 => {
+            Ok((size.saturating_sub(n), size))
+        }
         _ => Err(()),
     };
     Some(r)
@@ -756,6 +782,8 @@ async fn change(
             item = store::move_to(s, &me.id, &item, parent)
                 .await
                 .map_err(drive_error)?;
+            // A stricter folder takes away the shares it does not allow.
+            crate::share::recheck(instance, &me.id, &item).await?;
         }
         crate::index::item_changed(instance, &item).await;
     }
@@ -805,7 +833,8 @@ async fn restore(
     let back = store::restore(instance.store.as_ref(), &item)
         .await
         .map_err(drive_error)?;
-    crate::index::item_changed(instance, &back).await;
+    crate::share::recheck(instance, &me.id, &back).await?;
+    crate::index::tree_changed(instance, &back).await;
     Ok(ok(&items_json(
         instance,
         &me.id,
@@ -843,14 +872,13 @@ async fn copy(
     let v = store::version(s, &item, None)
         .await?
         .ok_or_else(|| drive_error(DriveError::NotFound))?;
-    let owner = if input.parent.is_empty() {
-        me.id.clone()
-    } else {
-        store::item(s, &input.parent)
-            .await?
-            .map(|p| p.owner_id)
-            .ok_or_else(|| drive_error(DriveError::NotFound))?
-    };
+    // Allowed there, and room for it, before anything is written.
+    let owner = store::place(s, &me.id, &input.parent)
+        .await
+        .map_err(drive_error)?;
+    if !store::fits(s, &owner, v.size).await? {
+        return Err(drive_error(DriveError::OverQuota));
+    }
     // The copy gets its own contents, so each can go its own way.
     let blob = store::blob_key(&owner);
     let mut writer = instance
@@ -860,20 +888,21 @@ async fn copy(
         .map_err(|e| drive_error(e.into()))?;
     let mut at = 0u64;
     while at < v.size as u64 {
-        let part = instance
-            .files
-            .read_range(&v.blob, at, 8 * READ_CHUNK)
-            .await
-            .map_err(|e| drive_error(e.into()))?
-            .unwrap_or_default();
+        let part = match instance.files.read_range(&v.blob, at, 8 * READ_CHUNK).await {
+            Ok(p) => p.unwrap_or_default(),
+            Err(e) => {
+                let _ = writer.abort().await;
+                return Err(drive_error(e.into()));
+            }
+        };
         if part.is_empty() {
             break;
         }
         at += part.len() as u64;
-        writer
-            .write(&part)
-            .await
-            .map_err(|e| drive_error(e.into()))?;
+        if let Err(e) = writer.write(&part).await {
+            let _ = writer.abort().await;
+            return Err(drive_error(e.into()));
+        }
     }
     writer.close().await.map_err(|e| drive_error(e.into()))?;
     let name = format!("Copy of {}", item.name);
@@ -898,6 +927,13 @@ async fn copy(
             return Err(drive_error(e));
         }
     };
+    // The copy keeps the classification of what it was copied from.
+    if let Some(label) = store::effective_label(s, &item).await? {
+        store::set_label(s, &copy.id, Some(&label)).await?;
+    }
+    let copy = store::item(s, &copy.id)
+        .await?
+        .ok_or_else(|| drive_error(DriveError::NotFound))?;
     crate::index::item_changed(instance, &copy).await;
     let role = store::role(s, &me.id, &copy).await?;
     Ok(ok(&items_json(instance, &me.id, &[copy], role).await[0]))
