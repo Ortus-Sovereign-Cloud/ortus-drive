@@ -242,7 +242,18 @@ fn h_show(
     Box::pin(async move {
         answer(
             &request,
-            show(&request, &params, &instance, &connection.client.ip).await,
+            show(
+                &request,
+                &params,
+                &instance,
+                // Behind a proxy, the visitor's address (not the proxy's).
+                &ortus_core::auth::client_address(
+                    &request,
+                    &connection,
+                    &instance.config.trusted_proxies,
+                ),
+            )
+            .await,
         )
     })
 }
@@ -256,7 +267,18 @@ fn h_content(
     Box::pin(async move {
         answer(
             &request,
-            content(&request, &params, &instance, &connection.client.ip).await,
+            content(
+                &request,
+                &params,
+                &instance,
+                // Behind a proxy, the visitor's address (not the proxy's).
+                &ortus_core::auth::client_address(
+                    &request,
+                    &connection,
+                    &instance.config.trusted_proxies,
+                ),
+            )
+            .await,
         )
     })
 }

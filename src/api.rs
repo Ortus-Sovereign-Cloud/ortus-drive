@@ -782,9 +782,32 @@ async fn change(
                 .map_err(drive_error)?;
         }
         if let Some(parent) = &input.parent {
+            let before = store::effective_label(s, &item).await?;
             item = store::move_to(s, &me.id, &item, parent)
                 .await
                 .map_err(drive_error)?;
+            // Moving never loosens a label: a file (or folder) taken out of
+            // a labelled folder keeps that label as its own.
+            let after = store::effective_label(s, &item).await?;
+            let before_rank = ortus_core::policy::label(s, before.as_deref()).await?.rank;
+            let after_rank = ortus_core::policy::label(s, after.as_deref()).await?.rank;
+            if before.is_some() && before_rank > after_rank {
+                store::set_label(s, &item.id, before.as_deref()).await?;
+                ortus_core::auth::audit(
+                    instance,
+                    ortus_core::audit::Event::new(
+                        "drive.label_kept",
+                        ortus_core::audit::Outcome::Done,
+                    )
+                    .by(&me.id)
+                    .on(&item.id)
+                    .with(json!({"label": before, "to": parent})),
+                )
+                .await;
+                item = store::item(s, &item.id)
+                    .await?
+                    .ok_or_else(ApiError::internal)?;
+            }
             // A stricter folder takes away the shares it does not allow.
             crate::share::recheck(instance, &me.id, &item).await?;
         }
