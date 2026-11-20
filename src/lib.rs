@@ -7,6 +7,7 @@ pub mod api;
 pub mod index;
 pub mod preview;
 pub mod public;
+pub mod restore;
 pub mod service;
 pub mod share;
 pub mod store;
@@ -111,6 +112,31 @@ impl App for Drive {
         _rules: &'a ortus_core::retention::Rules,
     ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move { store::forget(tx, user_id).await.map_err(|e| e.to_string()) })
+    }
+
+    fn restorable(&self) -> &'static [&'static str] {
+        &["folder"]
+    }
+
+    fn restore_choices<'a>(
+        &'a self,
+        point: &'a ortus_core::points::Snapshot,
+        user: &'a str,
+        _what: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<(String, String)>, String>> {
+        Box::pin(restore::choices(point, user))
+    }
+
+    fn restore<'a>(
+        &'a self,
+        instance: &'a Arc<Instance>,
+        point: &'a ortus_core::points::Snapshot,
+        user: &'a str,
+        _what: &'a str,
+        id: &'a str,
+        into: &'a str,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(restore::folder(instance, point, user, id, into))
     }
 }
 
