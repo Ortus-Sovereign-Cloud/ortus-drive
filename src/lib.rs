@@ -5,6 +5,8 @@
 
 pub mod api;
 pub mod index;
+pub mod public;
+pub mod share;
 pub mod store;
 
 use std::sync::Arc;
@@ -34,7 +36,10 @@ impl App for Drive {
     }
 
     fn routes(&self) -> Vec<ortus_core::api::Route> {
-        api::routes()
+        let mut all = api::routes();
+        all.extend(share::routes());
+        all.extend(public::routes());
+        all
     }
 
     fn periodic(&self) -> Vec<(&'static str, i64)> {

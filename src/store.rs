@@ -80,6 +80,11 @@ pub const MIGRATIONS: &[Migration] = &[
         created_at BIGINT NOT NULL
     )",
     },
+    Migration {
+        version: 3,
+        name: "addresses of outside shares",
+        sql: "ALTER TABLE drive_shares ADD COLUMN email TEXT",
+    },
 ];
 
 /// A person's own tree hangs from this parent.
