@@ -64,9 +64,23 @@ pub async fn folder(
             .or_default()
             .push(r);
     }
-    // The newest version of each file then.
+    // The items under the chosen folder, and the newest version of each
+    // of their files then (only theirs are read).
+    let mut under: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut todo = vec![id.to_string()];
+    while let Some(at) = todo.pop() {
+        for r in children.get(&at).map(Vec::as_slice).unwrap_or_default() {
+            let item = text(r, "id").to_string();
+            if under.len() < 200_000 && under.insert(item.clone()) {
+                todo.push(item);
+            }
+        }
+    }
     let mut newest: BTreeMap<String, (i64, String, i64)> = BTreeMap::new();
-    for v in point.rows("drive_versions", |_| true).await? {
+    for v in point
+        .rows("drive_versions", |r| under.contains(text(r, "item_id")))
+        .await?
+    {
         let (item, version) = (
             text(&v, "item_id").to_string(),
             int(&v, "version").unwrap_or(0),
