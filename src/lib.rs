@@ -17,6 +17,11 @@ use ortus_core::app::{App, AppInfo, Group, OutsideJobKind};
 use ortus_core::instance::Instance;
 use ortus_core::storage::{AsyncTx, BoxFuture, Migration};
 
+/// The built web client (web/dist).
+#[derive(rust_embed::RustEmbed)]
+#[folder = "web/dist"]
+struct Web;
+
 /// Hourly: unfinished uploads and month-old trash go.
 pub const SWEEP_JOB: &str = "drive.sweep";
 
@@ -35,6 +40,10 @@ impl App for Drive {
 
     fn migrations(&self) -> &'static [Migration] {
         store::MIGRATIONS
+    }
+
+    fn web_file(&self, path: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
+        Web::get(path).map(|file| file.data)
     }
 
     fn routes(&self) -> Vec<ortus_core::api::Route> {

@@ -155,6 +155,18 @@ async fn items_json(
         .collect()
 }
 
+/// Each item's sharing in short, for the list.
+async fn with_access(
+    instance: &Instance,
+    mut out: Vec<Value>,
+    items: &[Item],
+) -> Result<Vec<Value>, ApiError> {
+    for (v, item) in out.iter_mut().zip(items) {
+        v["access"] = crate::share::access(instance, &item.id).await?;
+    }
+    Ok(out)
+}
+
 /// A folder's contents with the way to it, or the person's own root.
 async fn list(request: &Request, instance: &Arc<Instance>) -> Result<Response, ApiError> {
     let me = signed(request, instance).await?;
@@ -162,9 +174,13 @@ async fn list(request: &Request, instance: &Arc<Instance>) -> Result<Response, A
     let parent = query(request, "parent").unwrap_or_default();
     if parent.is_empty() {
         let items = store::children(s, &me.id, store::ROOT).await?;
-        return Ok(ok(
-            &json!({ "items": items_json(instance, &me.id, &items, Some(Role::Owner)).await, "path": [], "role": "owner" }),
-        ));
+        let out = with_access(
+            instance,
+            items_json(instance, &me.id, &items, Some(Role::Owner)).await,
+            &items,
+        )
+        .await?;
+        return Ok(ok(&json!({ "items": out, "path": [], "role": "owner" })));
     }
     let (folder, role) = reach(instance, &me.id, &parent, Role::View).await?;
     if !folder.is_folder() {
@@ -181,7 +197,7 @@ async fn list(request: &Request, instance: &Arc<Instance>) -> Result<Response, A
     }
     path.reverse();
     Ok(ok(
-        &json!({ "items": items_json(instance, &me.id, &items, Some(role)).await, "path": path, "role": role.name() }),
+        &json!({ "items": with_access(instance, items_json(instance, &me.id, &items, Some(role)).await, &items).await?, "path": path, "role": role.name() }),
     ))
 }
 

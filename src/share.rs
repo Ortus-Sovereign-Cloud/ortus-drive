@@ -430,6 +430,89 @@ async fn link(
     list_response(instance, &me.id, &item).await
 }
 
+#[derive(Deserialize)]
+struct LinkChange {
+    /// Unix ms; 0 for no end.
+    #[serde(rename = "expiresAt")]
+    expires_at: Option<i64>,
+    /// Empty for none.
+    password: Option<String>,
+    #[serde(rename = "noDownload")]
+    no_download: Option<bool>,
+}
+
+/// Changes a link's end, password or downloads; its address stays.
+async fn change_link(
+    request: &Request,
+    params: &PathParams,
+    instance: &Arc<Instance>,
+) -> Result<Response, ApiError> {
+    let me = signed(request, instance).await?;
+    let input: LinkChange = body(request)?;
+    let id = params.get("share").unwrap_or_default();
+    let rows = instance
+        .store
+        .query(
+            &format!("{SHARE} WHERE id = $1 AND kind = 'link'"),
+            &[id.into()],
+        )
+        .await?;
+    let share = rows
+        .first()
+        .map(share_of)
+        .ok_or_else(|| ApiError::not_found("There is no such link."))?;
+    let (item, _) = reach(instance, &me.id, &share.item_id, Role::Edit).await?;
+    let s = instance.store.as_ref();
+    let now = ortus_core::program::now_ms();
+    if let Some(e) = input.expires_at {
+        if e != 0 && (e <= now || e > now + 366 * 86_400_000) {
+            return Err(ApiError::bad_request("A link ends within a year."));
+        }
+        s.execute(
+            "UPDATE drive_shares SET expires_at = $1 WHERE id = $2",
+            &[(if e == 0 { None } else { Some(e) }).into(), id.into()],
+        )
+        .await?;
+    }
+    if let Some(p) = input.password.as_deref().map(str::trim) {
+        let hash = match p {
+            "" => None,
+            p if p.len() < 8 || p.len() > 200 => {
+                return Err(ApiError::bad_request(
+                    "A link's password is 8 to 200 characters.",
+                ))
+            }
+            p => {
+                let p = p.to_string();
+                Some(
+                    tokio::task::spawn_blocking(move || {
+                        ortus_core::auth::credentials::hash_password(&p)
+                    })
+                    .await
+                    .map_err(|_| ApiError::internal())?,
+                )
+            }
+        };
+        s.execute(
+            "UPDATE drive_shares SET password = $1 WHERE id = $2",
+            &[hash.into(), id.into()],
+        )
+        .await?;
+    }
+    if let Some(no) = input.no_download {
+        // A label that wants a watermark keeps downloads blocked.
+        let label = store::effective_label(s, &item).await?;
+        let forced = policy::label(s, label.as_deref()).await?.rules.watermark;
+        s.execute(
+            "UPDATE drive_shares SET no_download = $1 WHERE id = $2",
+            &[i64::from(no || forced).into(), id.into()],
+        )
+        .await?;
+    }
+    audit(instance, &me.id, "drive.link_changed", &item, json!({"expires": input.expires_at, "password": input.password.as_ref().map(|p| !p.is_empty()), "noDownload": input.no_download})).await;
+    list_response(instance, &me.id, &item).await
+}
+
 async fn remove(
     request: &Request,
     params: &PathParams,
@@ -598,6 +681,35 @@ async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, 
     )
 }
 
+/// How an item is shared, in short: a link, groups by name, people.
+pub async fn access(instance: &Instance, item_id: &str) -> Result<Value, ApiError> {
+    let s = instance.store.as_ref();
+    let mut link = false;
+    let mut people = 0;
+    let mut groups = Vec::new();
+    for share in shares_of(instance, item_id).await? {
+        match share.kind.as_str() {
+            "link" => link = true,
+            "person" | "outside" => people += 1,
+            "group" => {
+                if let Some(n) = s
+                    .query(
+                        "SELECT name FROM core_groups WHERE id = $1",
+                        &[share.target.as_str().into()],
+                    )
+                    .await?
+                    .first()
+                    .and_then(|r| r.text(0).map(str::to_string))
+                {
+                    groups.push(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(json!({"link": link, "people": people, "groups": groups}))
+}
+
 async fn list_response(instance: &Instance, me: &str, item: &Item) -> Result<Response, ApiError> {
     Ok(ok(&list_body(instance, me, item).await?))
 }
@@ -669,6 +781,27 @@ async fn shared_with_me(request: &Request, instance: &Arc<Instance>) -> Result<R
     Ok(ok(&json!({ "items": out })))
 }
 
+/// The labels one can give a file or folder, weakest first.
+async fn labels(request: &Request, instance: &Arc<Instance>) -> Result<Response, ApiError> {
+    signed(request, instance).await?;
+    let mut list = policy::labels(instance.store.as_ref()).await?;
+    list.sort_by_key(|l| l.rank);
+    let out: Vec<Value> = list
+        .iter()
+        .map(|l| json!({"id": l.id, "name": l.name}))
+        .collect();
+    Ok(ok(&json!({ "labels": out })))
+}
+
+fn h_labels(
+    request: Request,
+    _: PathParams,
+    _: ConnectionInfo,
+    instance: Arc<Instance>,
+) -> BoxFuture<'static, Response> {
+    Box::pin(async move { answer(&request, labels(&request, &instance).await) })
+}
+
 macro_rules! with_params {
     ($name:ident, $f:ident) => {
         fn $name(
@@ -685,6 +818,7 @@ with_params!(h_list, list);
 with_params!(h_add, add);
 with_params!(h_link, link);
 with_params!(h_remove, remove);
+with_params!(h_change_link, change_link);
 with_params!(h_label, set_label);
 
 fn h_shared(
@@ -716,7 +850,9 @@ pub fn routes() -> Vec<Route> {
         route(Method::Post, "/drive/items/:item/shares", "driveShare", "Share with {email} (a colleague, or someone outside who gets a view link) or {group}, as {role}: view, comment or edit. The label policy decides; a warning needs {reason}.", h_add),
         route(Method::Post, "/drive/items/:item/link", "driveLink", "A link for anyone who has it, view only: {expiresAt, password, noDownload, reason}. Replaces the old one. The label policy decides.", h_link),
         route(Method::Delete, "/drive/shares/:share", "driveUnshare", "Take a share or link away.", h_remove),
+        route(Method::Patch, "/drive/shares/:share", "driveChangeLink", "Change a link, keeping its address: {expiresAt (0 for none), password (empty for none), noDownload}.", h_change_link),
         route(Method::Put, "/drive/items/:item/label", "driveLabel", "The owner labels an item: {label}. Shares the label no longer allows are taken away.", h_label),
+        route(Method::Get, "/drive/labels", "driveLabels", "The labels one can give a file or folder.", h_labels),
         route(Method::Get, "/drive/shared", "driveSharedWithMe", "What others share with one, directly or through a group.", h_shared),
     ]
 }
