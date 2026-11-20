@@ -85,6 +85,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "addresses of outside shares",
         sql: "ALTER TABLE drive_shares ADD COLUMN email TEXT",
     },
+    Migration {
+        version: 4,
+        name: "notes on saved files",
+        sql: "ALTER TABLE drive_items ADD COLUMN note TEXT",
+    },
 ];
 
 /// A person's own tree hangs from this parent.
@@ -867,6 +872,45 @@ pub async fn from_source(
         .iter()
         .map(item_of)
         .collect())
+}
+
+/// A name free in a folder: the name itself, or "name (2).ext" and on.
+pub async fn free_name(
+    store: &dyn AsyncStore,
+    owner_id: &str,
+    parent_id: &str,
+    name: &str,
+) -> StoreResult<String> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let candidate = if n == 1 {
+            name.to_string()
+        } else {
+            format!("{stem} ({n}){ext}")
+        };
+        let taken = store
+            .query("SELECT 1 FROM drive_items WHERE owner_id = $1 AND parent_id = $2 AND LOWER(name) = LOWER($3) AND trashed_at IS NULL", &[owner_id.into(), parent_id.into(), candidate.as_str().into()])
+            .await?;
+        if taken.is_empty() {
+            return Ok(candidate);
+        }
+    }
+    Ok(format!("{stem} ({}){ext}", ortus_core::auth::random_hex(3)))
+}
+
+/// A note on how a file came (a saved attachment's sender).
+pub async fn note(store: &dyn AsyncStore, item_id: &str) -> StoreResult<Option<String>> {
+    Ok(store
+        .query(
+            "SELECT note FROM drive_items WHERE id = $1",
+            &[item_id.into()],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.text(0).map(str::to_string)))
 }
 
 /// Sets the classification label of an item (checked by the caller).

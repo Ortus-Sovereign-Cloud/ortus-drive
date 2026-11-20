@@ -341,3 +341,57 @@ fn files_through_the_api() {
         );
     }
 }
+
+#[test]
+fn files_from_mail_land_in_from_email() {
+    for (name, instance, _keep) in common::installations() {
+        for app in instance.apps.clone() {
+            app.provide(&instance, &instance.services);
+        }
+        let olena = Client {
+            inner: TestClient::new(ortus_core::app(Arc::clone(&instance))),
+            token: signed_in(&instance, "olena@ministry.example", Role::Member),
+        };
+        let id = ortus_core::runtime::block_on(ortus_core::auth::accounts::by_email(
+            instance.store.as_ref(),
+            "olena@ministry.example",
+        ))
+        .unwrap()
+        .unwrap()
+        .id;
+        let drive = ortus_core::runtime::block_on(
+            instance
+                .services
+                .get::<dyn ortus_core::interfaces::Drive>(&instance.switches),
+        )
+        .expect("drive provides Drive");
+        for _ in 0..2 {
+            ortus_core::runtime::block_on(drive.save(
+                &id,
+                "gauge-report.pdf",
+                "application/pdf",
+                b"%PDF-1.4",
+                "mail",
+                Some("Attached by Anna Kowalska"),
+            ))
+            .unwrap();
+        }
+        let (_, from_mail) = olena.json("GET", "/drive/special?which=email", None);
+        let mut names: Vec<String> = from_mail["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            vec!["gauge-report (2).pdf", "gauge-report.pdf"],
+            names,
+            "{name}: never a new version of another file"
+        );
+        assert_eq!(
+            json!("Attached by Anna Kowalska"),
+            from_mail["items"][0]["note"]
+        );
+    }
+}

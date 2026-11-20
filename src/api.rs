@@ -958,8 +958,11 @@ async fn special(request: &Request, instance: &Arc<Instance>) -> Result<Response
     }
     let list: Vec<Item> = items.iter().map(|(i, _)| i.clone()).collect();
     let mut out = items_json(instance, &me.id, &list, None).await;
-    for (v, (_, role)) in out.iter_mut().zip(&items) {
+    for (v, (item, role)) in out.iter_mut().zip(&items) {
         v["role"] = json!(role.name());
+        if item.source.is_some() {
+            v["note"] = json!(store::note(s, &item.id).await?);
+        }
     }
     Ok(ok(&json!({ "items": out })))
 }

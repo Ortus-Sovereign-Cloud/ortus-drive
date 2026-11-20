@@ -7,6 +7,7 @@ pub mod api;
 pub mod index;
 pub mod preview;
 pub mod public;
+pub mod service;
 pub mod share;
 pub mod store;
 
@@ -42,6 +43,13 @@ impl App for Drive {
         all.extend(public::routes());
         all.extend(preview::routes());
         all
+    }
+
+    fn provide(&self, instance: &Arc<Instance>, services: &ortus_core::services::Services) {
+        let drive: Arc<dyn ortus_core::interfaces::Drive> = Arc::new(service::Service {
+            instance: Arc::downgrade(instance),
+        });
+        services.provide("drive", drive);
     }
 
     fn search_owners<'a>(
