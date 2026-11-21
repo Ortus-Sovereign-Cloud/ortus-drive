@@ -5,6 +5,8 @@ const messages: Record<DriveKey, DriveMessage> = {
   myDrive: "Mon drive",
   sharedWithMe: "Partagés avec moi",
   recent: "Récents",
+  todayNoFiles: "Aucun fichier récent.",
+  todayOpen: "Ouvrir Drive",
   starred: "Suivis",
   fromEmail: "Depuis les e-mails",
   trash: "Corbeille",

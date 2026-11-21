@@ -6,6 +6,8 @@ const en = {
   myDrive: "My drive",
   sharedWithMe: "Shared with me",
   recent: "Recent",
+  todayNoFiles: "No recent files.",
+  todayOpen: "Open Drive",
   starred: "Starred",
   fromEmail: "From email",
   trash: "Trash",

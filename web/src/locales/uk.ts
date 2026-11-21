@@ -5,6 +5,8 @@ const messages: Record<DriveKey, DriveMessage> = {
   myDrive: "Мій диск",
   sharedWithMe: "Доступні мені",
   recent: "Нещодавні",
+  todayNoFiles: "Немає нещодавніх файлів.",
+  todayOpen: "Відкрити диск",
   starred: "Із зірочкою",
   fromEmail: "З пошти",
   trash: "Кошик",
