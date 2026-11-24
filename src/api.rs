@@ -102,16 +102,19 @@ pub(crate) async fn reach(
 
 /// The names people see for those who changed things.
 async fn names(instance: &Instance, ids: &[&str]) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    for id in ids {
-        if out.contains_key(*id) {
-            continue;
-        }
-        if let Ok(Some(u)) = ortus_core::auth::accounts::by_id(instance.store.as_ref(), id).await {
-            out.insert(id.to_string(), u.name);
-        }
-    }
-    out
+    // Everyone named in one query, not one each.
+    let mut seen = std::collections::HashSet::new();
+    let wanted: Vec<String> = ids
+        .iter()
+        .filter(|id| seen.insert(**id))
+        .map(|id| id.to_string())
+        .collect();
+    ortus_core::auth::accounts::by_ids(instance.store.as_ref(), &wanted)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| (u.id, u.name))
+        .collect()
 }
 
 pub(crate) fn item_json(
@@ -162,8 +165,10 @@ async fn with_access(
     mut out: Vec<Value>,
     items: &[Item],
 ) -> Result<Vec<Value>, ApiError> {
+    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    let mut access = crate::share::access_of(instance, &ids).await?;
     for (v, item) in out.iter_mut().zip(items) {
-        v["access"] = crate::share::access(instance, &item.id).await?;
+        v["access"] = access.remove(&item.id).unwrap_or(Value::Null);
     }
     Ok(out)
 }

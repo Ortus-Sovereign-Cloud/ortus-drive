@@ -791,11 +791,43 @@ async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, 
 
 /// How an item is shared, in short: a link, groups by name, people.
 pub async fn access(instance: &Instance, item_id: &str) -> Result<Value, ApiError> {
+    summed(instance, &shares_of(instance, item_id).await?).await
+}
+
+/// [`access`] of several items, their shares read in one query.
+pub async fn access_of(
+    instance: &Instance,
+    item_ids: &[String],
+) -> Result<std::collections::HashMap<String, Value>, ApiError> {
+    let mut shares: std::collections::HashMap<String, Vec<Share>> = Default::default();
+    for chunk in item_ids.chunks(256) {
+        let (list, values) = ortus_core::storage::any_of(1, chunk);
+        for r in instance
+            .store
+            .query(
+                &format!("{SHARE} WHERE item_id IN ({list}) ORDER BY created_at"),
+                &values,
+            )
+            .await?
+        {
+            let share = share_of(&r);
+            shares.entry(share.item_id.clone()).or_default().push(share);
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for id in item_ids {
+        let theirs = shares.remove(id).unwrap_or_default();
+        out.insert(id.clone(), summed(instance, &theirs).await?);
+    }
+    Ok(out)
+}
+
+async fn summed(instance: &Instance, shares: &[Share]) -> Result<Value, ApiError> {
     let s = instance.store.as_ref();
     let mut link = false;
     let mut people = 0;
     let mut groups = Vec::new();
-    for share in shares_of(instance, item_id).await? {
+    for share in shares {
         match share.kind.as_str() {
             "link" => link = true,
             "person" | "outside" => people += 1,
