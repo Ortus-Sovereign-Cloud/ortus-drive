@@ -30,7 +30,7 @@ export class OrtusDrivePublic extends LitElement {
     css`
       :host {
         display: block;
-        min-block-size: 100vh;
+        min-block-size: 100dvh;
         padding: 24px;
         box-sizing: border-box;
         background: var(--ortus-bg);
@@ -137,6 +137,17 @@ export class OrtusDrivePublic extends LitElement {
       .quiet {
         font-size: 14px;
         color: var(--ortus-text-3);
+      }
+      @media (max-width: 720px) {
+        :host {
+          padding: 12px;
+        }
+        .bar {
+          flex-wrap: wrap;
+        }
+        .text {
+          padding: 16px;
+        }
       }
     `,
   ];

@@ -87,7 +87,7 @@ export class OrtusDriveHome extends LitElement {
       :host {
         display: grid;
         grid-template-rows: auto 1fr;
-        min-block-size: 100vh;
+        min-block-size: var(--ortus-screen, 100vh);
         color: var(--ortus-text);
       }
       header {
@@ -113,7 +113,7 @@ export class OrtusDriveHome extends LitElement {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        min-block-size: calc(100vh - 110px);
+        min-block-size: calc(var(--ortus-screen, 100vh) - 110px);
       }
       .make {
         display: flex;
@@ -447,6 +447,8 @@ export class OrtusDriveHome extends LitElement {
       }
       dialog {
         inline-size: min(440px, 92vw);
+        max-inline-size: calc(100vw - 16px);
+        box-sizing: border-box;
         padding: 0;
         border-radius: 18px;
         border: 1px solid var(--ortus-line-strong);
@@ -482,6 +484,132 @@ export class OrtusDriveHome extends LitElement {
         block-size: 1px;
         overflow: hidden;
         clip-path: inset(50%);
+      }
+      .phone {
+        display: none;
+      }
+      /* A phone: one pane at a time. The sections are a row over the
+         list; a chosen file's card is the whole screen with a way back. */
+      @media (max-width: 720px) {
+        :host {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        header {
+          padding-block: 10px;
+          padding-inline: 12px;
+        }
+        .search {
+          inline-size: 100%;
+        }
+        .button {
+          min-block-size: 44px;
+        }
+        .body {
+          grid-template-columns: minmax(0, 1fr);
+          align-content: start;
+          gap: 16px;
+          padding-block: 12px;
+          padding-inline: 12px;
+        }
+        .body > * {
+          min-inline-size: 0;
+        }
+        aside.side {
+          min-block-size: 0;
+        }
+        .make {
+          margin-block-end: 8px;
+        }
+        nav {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 4px;
+        }
+        nav button {
+          inline-size: auto;
+          block-size: 44px;
+          gap: 8px;
+          white-space: nowrap;
+        }
+        .quota {
+          margin-block-start: 8px;
+        }
+        .body.detail-open aside.side,
+        .body.detail-open main {
+          display: none;
+        }
+        aside:not(.side):empty {
+          display: none;
+        }
+        .phone {
+          display: inline-flex;
+        }
+        .back {
+          justify-self: start;
+          gap: 6px;
+        }
+        .top {
+          flex-wrap: wrap;
+          margin-block-end: 12px;
+        }
+        .crumbs {
+          flex-basis: 100%;
+          flex-wrap: wrap;
+          font-size: 18px;
+        }
+        .crumbs button {
+          min-block-size: 44px;
+        }
+        .views button {
+          inline-size: 44px;
+          block-size: 44px;
+        }
+        .suggested {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 8px;
+        }
+        .card {
+          padding: 10px;
+        }
+        .table {
+          overflow-x: auto;
+        }
+        table {
+          table-layout: fixed;
+        }
+        th,
+        td {
+          padding-inline: 12px;
+        }
+        th:nth-child(2),
+        td:nth-child(2),
+        th:nth-child(4),
+        td:nth-child(4) {
+          display: none;
+        }
+        th:nth-child(3) {
+          inline-size: 76px;
+        }
+        td.first button {
+          inline-size: 100%;
+          max-inline-size: 100%;
+          min-block-size: 44px;
+        }
+        td.first .name {
+          min-inline-size: 0;
+        }
+        .grid {
+          grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+          gap: 10px;
+        }
+        .uploads {
+          inset-inline: 8px;
+          inset-block-end: 8px;
+          inline-size: auto;
+        }
+        form {
+          padding: 16px;
+        }
       }
     `,
   ];
@@ -685,7 +813,7 @@ export class OrtusDriveHome extends LitElement {
     return html`<header>
         <input class="input search" type="search" placeholder=${t(this.localize, "searchFiles")} aria-label=${t(this.localize, "searchFiles")} .value=${this.query} @input=${(e: Event) => (this.query = (e.target as HTMLInputElement).value)} @keydown=${(e: KeyboardEvent) => e.key === "Enter" && this.search()} />
       </header>
-      <div class="body ${this.dropping ? "drop" : ""}" @dragover=${(e: DragEvent) => (e.preventDefault(), (this.dropping = true))} @dragleave=${() => (this.dropping = false)} @drop=${(e: DragEvent) => {
+      <div class="body ${this.dropping ? "drop" : ""} ${this.selected ? "detail-open" : ""}" @dragover=${(e: DragEvent) => (e.preventDefault(), (this.dropping = true))} @dragleave=${() => (this.dropping = false)} @drop=${(e: DragEvent) => {
         e.preventDefault();
         this.dropping = false;
         const files = [...(e.dataTransfer?.files ?? [])];
@@ -770,7 +898,7 @@ export class OrtusDriveHome extends LitElement {
   }
 
   private renderTable(list: Item[]) {
-    return html`<table>
+    return html`<div class="table"><table>
       <thead>
         <tr>
           <th scope="col">${t(this.localize, "name")}</th>
@@ -795,7 +923,7 @@ export class OrtusDriveHome extends LitElement {
           </tr>`,
         )}
       </tbody>
-    </table>`;
+    </table></div>`;
   }
 
   private renderGrid(list: Item[]) {
@@ -816,6 +944,7 @@ export class OrtusDriveHome extends LitElement {
     const people = d?.access?.people ?? [];
     const names = people.map((p) => (p.you ? t(this.localize, "you") : p.name.split(" ")[0])).join(", ");
     return html`<section class="detail" aria-label=${item.name}>
+      <button class="button phone back" @click=${() => this.select(null)}><span aria-hidden="true">${document.dir === "rtl" ? "›" : "‹"}</span>${t(this.localize, "back")}</button>
       ${item.mime.startsWith("image/") ? html`<img class="thumb" src="/api/v1/drive/items/${item.id}/thumbnail" alt="" />` : html`<div class="page" aria-hidden="true">${(d?.text ?? "").slice(0, 600)}</div>`}
       <h3 dir="auto">${item.name}</h3>
       <p>${item.kind === "file" ? `${sizeText(item.size)} · ` : ""}${item.modifiedBy ? t(this.localize, "editedBy", { who: item.modifiedBy, when: whenText(item.modifiedAt) }) : whenText(item.modifiedAt)}</p>

@@ -50,7 +50,7 @@ export class OrtusDriveFile extends LitElement {
       :host {
         display: grid;
         grid-template-rows: auto 1fr;
-        min-block-size: 100vh;
+        min-block-size: var(--ortus-screen, 100vh);
         color: var(--ortus-text);
       }
       header {
@@ -133,6 +133,8 @@ export class OrtusDriveFile extends LitElement {
       }
       dialog {
         inline-size: min(560px, 94vw);
+        max-inline-size: calc(100vw - 16px);
+        box-sizing: border-box;
         padding: 0;
         border-radius: 22px;
         border: 1px solid var(--ortus-line-strong);
@@ -317,6 +319,72 @@ export class OrtusDriveFile extends LitElement {
       .options input {
         min-inline-size: 0;
         inline-size: 100%;
+      }
+      /* A phone: the header's buttons wrap under the name, the page fills
+         the width, the share dialog stacks. */
+      @media (max-width: 720px) {
+        :host {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        header {
+          flex-wrap: wrap;
+          gap: 8px 10px;
+          padding-block: 10px;
+          padding-inline: 8px 12px;
+        }
+        header > div {
+          flex: 1;
+          min-inline-size: 0;
+        }
+        h1 {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .spacer {
+          flex-basis: 100%;
+          block-size: 0;
+        }
+        .back {
+          inline-size: 44px;
+          block-size: 44px;
+        }
+        .button {
+          min-block-size: 44px;
+        }
+        main {
+          padding: 12px;
+        }
+        .text {
+          padding: 20px;
+        }
+        .none {
+          padding: 24px;
+        }
+        form {
+          padding: 16px;
+        }
+        .add {
+          flex-wrap: wrap;
+        }
+        .add input {
+          flex-basis: 100%;
+        }
+        .add select {
+          flex: 1;
+        }
+        .options {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        li.person {
+          gap: 10px;
+        }
+        li.person small {
+          overflow-wrap: anywhere;
+        }
+        .url {
+          padding-inline-start: 10px;
+        }
       }
     `,
   ];
