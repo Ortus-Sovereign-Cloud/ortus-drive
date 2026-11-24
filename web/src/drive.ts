@@ -604,7 +604,7 @@ export class OrtusDriveHome extends LitElement {
         }
         .uploads {
           inset-inline: 8px;
-          inset-block-end: 8px;
+          inset-block-end: calc(var(--ortus-bar, 0px) + 8px);
           inline-size: auto;
         }
         form {
