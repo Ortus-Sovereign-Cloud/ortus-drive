@@ -312,10 +312,7 @@ async fn add(
     }
     let s = instance.store.as_ref();
     if let Some(group) = input.group.as_deref() {
-        if s.query("SELECT 1 FROM core_groups WHERE id = $1", &[group.into()])
-            .await?
-            .is_empty()
-        {
+        if ortus_core::people::group(s, group).await?.is_none() {
             return Err(ApiError::not_found("There is no such group."));
         }
         ask(
@@ -778,7 +775,7 @@ async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, 
                 }
             }
             "group" => {
-                let name = s.query("SELECT name FROM core_groups WHERE id = $1", &[share.target.as_str().into()]).await?.first().and_then(|r| r.text(0).map(str::to_string)).unwrap_or_default();
+                let name = ortus_core::people::group(s, &share.target).await?.map(|g| g.name).unwrap_or_default();
                 groups.push(json!({"share": share.id, "group": share.target, "name": name, "role": share.role}));
             }
             "outside" if editor => outside.push(json!({"share": share.id, "email": share.email, "role": "view", "url": token_of(instance, &share).map(|t| link_url(instance, &t)), "expiresAt": share.expires_at, "opened": share.opened})),
@@ -803,16 +800,8 @@ pub async fn access(instance: &Instance, item_id: &str) -> Result<Value, ApiErro
             "link" => link = true,
             "person" | "outside" => people += 1,
             "group" => {
-                if let Some(n) = s
-                    .query(
-                        "SELECT name FROM core_groups WHERE id = $1",
-                        &[share.target.as_str().into()],
-                    )
-                    .await?
-                    .first()
-                    .and_then(|r| r.text(0).map(str::to_string))
-                {
-                    groups.push(n);
+                if let Some(g) = ortus_core::people::group(s, &share.target).await? {
+                    groups.push(g.name);
                 }
             }
             _ => {}

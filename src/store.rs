@@ -271,14 +271,10 @@ pub async fn ancestors(store: &dyn AsyncStore, item: &Item) -> StoreResult<Vec<I
 
 /// The groups a person is in.
 pub async fn groups_of(store: &dyn AsyncStore, user_id: &str) -> StoreResult<Vec<String>> {
-    Ok(store
-        .query(
-            "SELECT group_id FROM core_group_members WHERE user_id = $1",
-            &[user_id.into()],
-        )
+    Ok(ortus_core::people::groups_of(store, user_id)
         .await?
-        .iter()
-        .filter_map(|r| r.text(0).map(str::to_string))
+        .into_iter()
+        .map(|g| g.id)
         .collect())
 }
 
@@ -419,14 +415,7 @@ pub async fn used(store: &dyn AsyncStore, owner_id: &str) -> StoreResult<i64> {
 
 /// The account's quota in bytes, if it has one.
 pub async fn quota(store: &dyn AsyncStore, owner_id: &str) -> StoreResult<Option<i64>> {
-    Ok(store
-        .query(
-            "SELECT quota_bytes FROM core_users WHERE id = $1",
-            &[owner_id.into()],
-        )
-        .await?
-        .first()
-        .and_then(|r| r.int(0)))
+    ortus_core::people::quota(store, owner_id).await
 }
 
 /// Whether `more` bytes fit in the owner's quota.
@@ -476,11 +465,7 @@ pub async fn add_file(
     let mut tx = store.begin().await?;
     // Again inside the transaction: uploads finishing together share one quota.
     if let Some(q) = limit {
-        tx.execute(
-            "UPDATE core_users SET quota_bytes = quota_bytes WHERE id = $1",
-            &[owner.as_str().into()],
-        )
-        .await?;
+        ortus_core::people::quota_locked(&mut *tx, &owner).await?;
         let used = tx
             .query("SELECT CAST(COALESCE(SUM(v.size), 0) AS BIGINT) FROM drive_versions v JOIN drive_items i ON i.id = v.item_id WHERE i.owner_id = $1", &[owner.as_str().into()])
             .await?
