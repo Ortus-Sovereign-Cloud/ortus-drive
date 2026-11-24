@@ -90,6 +90,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "notes on saved files",
         sql: "ALTER TABLE drive_items ADD COLUMN note TEXT",
     },
+    Migration {
+        version: 5,
+        name: "link tokens kept hashed, and sealed for their address",
+        sql: "ALTER TABLE drive_shares ADD COLUMN token_sealed TEXT",
+    },
 ];
 
 /// A person's own tree hangs from this parent.

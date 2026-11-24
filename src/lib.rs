@@ -79,6 +79,16 @@ impl App for Drive {
         Box::pin(index::visible(instance, user, ids))
     }
 
+    // Link tokens are sealed: a key rotation re-seals them.
+    fn sealed(&self) -> Vec<ortus_core::secrets::Place> {
+        vec![ortus_core::secrets::Place {
+            table: "drive_shares",
+            id: "id",
+            column: "token_sealed",
+            fields: &[],
+        }]
+    }
+
     fn periodic(&self) -> Vec<(&'static str, i64)> {
         vec![(SWEEP_JOB, 60 * 60 * 1000)]
     }
@@ -100,7 +110,10 @@ impl App for Drive {
             kind: SWEEP_JOB.into(),
             handler: Box::new(move |_| {
                 let instance = Arc::clone(&instance);
-                Box::pin(async move { api::sweep_uploads(&instance).await })
+                Box::pin(async move {
+                    share::hash_old_links(&instance).await?;
+                    api::sweep_uploads(&instance).await
+                })
             }),
         }]
     }

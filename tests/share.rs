@@ -287,6 +287,73 @@ fn shares_follow_the_label_rules() {
         let (_, listed) = olena.json("GET", &format!("/drive/items/{doc}/shares"), None);
         assert_eq!(json!(1), listed["link"]["opened"], "{name}");
 
+        // The database keeps the token's hash and a sealed copy, never
+        // the token: its address is still shown to the owner.
+        let kept = ortus_core::runtime::block_on(instance.store.query(
+            "SELECT target, token_sealed FROM drive_shares WHERE kind = 'link'",
+            &[],
+        ))
+        .unwrap();
+        assert!(
+            kept.iter().all(|r| r.text(0) != Some(token.as_str())),
+            "{name}: a raw token is kept"
+        );
+        assert!(
+            kept.iter()
+                .all(|r| r.text(1).is_some_and(|t| !t.contains(&token))),
+            "{name}"
+        );
+        assert_eq!(
+            listed["link"]["url"].as_str().unwrap().rsplit('/').next(),
+            Some(token.as_str()),
+            "{name}"
+        );
+
+        // A link made before tokens were hashed still opens, before and
+        // after the sweep hashes it, and keeps its address.
+        let old = "0123456789abcdef0123456789abcdef";
+        ortus_core::runtime::block_on(instance.store.execute(
+            "UPDATE drive_shares SET target = $1, token_sealed = NULL WHERE kind = 'link' AND target = $2",
+            &[old.into(), ortus_drive::share::token_hash(&token).into()],
+        ))
+        .unwrap();
+        assert_eq!(
+            200,
+            visitor
+                .send(
+                    "GET",
+                    &format!("/drive/links/{old}"),
+                    None,
+                    false,
+                    &[("X-Ortus-Link-Password", "river-gauge-42")]
+                )
+                .0,
+            "{name}: an old link"
+        );
+        assert_eq!(
+            1,
+            ortus_core::runtime::block_on(ortus_drive::share::hash_old_links(&instance)).unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            200,
+            visitor
+                .send(
+                    "GET",
+                    &format!("/drive/links/{old}"),
+                    None,
+                    false,
+                    &[("X-Ortus-Link-Password", "river-gauge-42")]
+                )
+                .0,
+            "{name}: a hashed old link"
+        );
+        let (_, listed) = olena.json("GET", &format!("/drive/items/{doc}/shares"), None);
+        assert!(
+            listed["link"]["url"].as_str().unwrap().ends_with(old),
+            "{name}: {listed}"
+        );
+
         // SECRET: the link and the outside share go; the colleague stays.
         let (status, strict) = olena.json(
             "PUT",

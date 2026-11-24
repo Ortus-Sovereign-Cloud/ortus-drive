@@ -25,8 +25,13 @@ pub struct Share {
     pub item_id: String,
     /// person, group, outside or link.
     pub kind: String,
-    /// A user id, a group id, an address (outside), or the link's token.
+    /// A user id or a group id; for a link or an outside share the
+    /// SHA-256 of its token (older rows: the token itself, until the
+    /// hourly sweep hashes them).
     pub target: String,
+    /// A link's token, sealed with the master key, so its address can be
+    /// shown again to those who may change sharing.
+    pub token_sealed: Option<String>,
     pub role: String,
     pub expires_at: Option<i64>,
     pub password: Option<String>,
@@ -36,7 +41,7 @@ pub struct Share {
     pub email: Option<String>,
 }
 
-const SHARE: &str = "SELECT id, item_id, kind, target, role, expires_at, password, no_download, opened, email FROM drive_shares";
+const SHARE: &str = "SELECT id, item_id, kind, target, role, expires_at, password, no_download, opened, email, token_sealed FROM drive_shares";
 
 fn share_of(r: &ortus_core::storage::Row) -> Share {
     Share {
@@ -50,7 +55,61 @@ fn share_of(r: &ortus_core::storage::Row) -> Share {
         no_download: r.int(7).unwrap_or(0) != 0,
         opened: r.int(8).unwrap_or(0),
         email: r.text(9).map(str::to_string),
+        token_sealed: r.text(10).map(str::to_string),
     }
+}
+
+/// Whether a share is reached by a token (a link, or someone outside).
+fn by_link(kind: &str) -> bool {
+    kind == "link" || kind == "outside"
+}
+
+/// What a token is kept as: its SHA-256, so the database alone opens no
+/// link.
+pub fn token_hash(token: &str) -> String {
+    ortus_core::oidc::sha256_hex(token)
+}
+
+/// A share's token, for its address: opened from its sealed copy, or the
+/// target of an older row not yet hashed.
+pub fn token_of(instance: &Instance, share: &Share) -> Option<String> {
+    match &share.token_sealed {
+        Some(sealed) => instance.keys.open_text(sealed).ok(),
+        None if share.target.len() == 32 => Some(share.target.clone()),
+        None => None,
+    }
+}
+
+/// Hashes the tokens of links made before they were kept hashed. Run by
+/// the hourly sweep; a lookup finds either form meanwhile.
+pub async fn hash_old_links(instance: &Instance) -> Result<u64, String> {
+    let rows = instance
+        .store
+        .query(
+            "SELECT id, target FROM drive_shares WHERE kind IN ('link', 'outside') AND token_sealed IS NULL LIMIT 500",
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut done = 0;
+    for r in rows {
+        let (Some(id), Some(token)) = (r.text(0), r.text(1)) else {
+            continue;
+        };
+        if token.len() != 32 {
+            continue;
+        }
+        instance
+            .store
+            .execute(
+                "UPDATE drive_shares SET target = $1, token_sealed = $2 WHERE id = $3 AND token_sealed IS NULL",
+                &[token_hash(token).into(), instance.keys.seal_text(token).into(), id.into()],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        done += 1;
+    }
+    Ok(done)
 }
 
 pub async fn shares_of(instance: &Instance, item_id: &str) -> Result<Vec<Share>, ApiError> {
@@ -75,8 +134,8 @@ pub async fn by_token(instance: &Instance, token: &str) -> Result<Option<Share>,
     Ok(instance
         .store
         .query(
-            &format!("{SHARE} WHERE kind IN ('link', 'outside') AND target = $1"),
-            &[token.into()],
+            &format!("{SHARE} WHERE kind IN ('link', 'outside') AND target IN ($1, $2)"),
+            &[token_hash(token).into(), token.into()],
         )
         .await?
         .first()
@@ -214,9 +273,15 @@ async fn insert(
         )
         .await?;
     }
+    // A token is kept hashed, and sealed for showing its address again.
+    let (target, sealed) = if by_link(kind) {
+        (token_hash(target), Some(instance.keys.seal_text(target)))
+    } else {
+        (target.to_string(), None)
+    };
     tx.execute(
-        "INSERT INTO drive_shares (id, item_id, kind, target, role, expires_at, no_download, opened, created_by, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9)",
-        &[id.as_str().into(), item.id.as_str().into(), kind.into(), target.into(), role.into(), expires_at.into(), i64::from(no_download).into(), user.into(), ortus_core::program::now_ms().into()],
+        "INSERT INTO drive_shares (id, item_id, kind, target, role, expires_at, no_download, opened, created_by, created_at, token_sealed) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)",
+        &[id.as_str().into(), item.id.as_str().into(), kind.into(), target.as_str().into(), role.into(), expires_at.into(), i64::from(no_download).into(), user.into(), ortus_core::program::now_ms().into(), sealed.into()],
     )
     .await?;
     tx.commit().await?;
@@ -716,8 +781,8 @@ async fn list_body(instance: &Instance, me: &str, item: &Item) -> Result<Value, 
                 let name = s.query("SELECT name FROM core_groups WHERE id = $1", &[share.target.as_str().into()]).await?.first().and_then(|r| r.text(0).map(str::to_string)).unwrap_or_default();
                 groups.push(json!({"share": share.id, "group": share.target, "name": name, "role": share.role}));
             }
-            "outside" if editor => outside.push(json!({"share": share.id, "email": share.email, "role": "view", "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "opened": share.opened})),
-            "link" if editor => link = json!({"share": share.id, "url": link_url(instance, &share.target), "expiresAt": share.expires_at, "password": share.password.is_some(), "noDownload": share.no_download, "opened": share.opened}),
+            "outside" if editor => outside.push(json!({"share": share.id, "email": share.email, "role": "view", "url": token_of(instance, &share).map(|t| link_url(instance, &t)), "expiresAt": share.expires_at, "opened": share.opened})),
+            "link" if editor => link = json!({"share": share.id, "url": token_of(instance, &share).map(|t| link_url(instance, &t)), "expiresAt": share.expires_at, "password": share.password.is_some(), "noDownload": share.no_download, "opened": share.opened}),
             "link" => link = json!({"expiresAt": share.expires_at}),
             _ => {}
         }
